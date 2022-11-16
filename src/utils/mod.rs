@@ -4,11 +4,13 @@ pub mod fs;
 mod string;
 pub(crate) mod toml_ext;
 use crate::errors::Error;
+use log::error;
+use once_cell::sync::Lazy;
+use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, Options, Parser, Tag};
 use regex::Regex;
 
-use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, Options, Parser, Tag};
-
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::Path;
 
@@ -19,9 +21,7 @@ pub use self::string::{
 
 /// Replaces multiple consecutive whitespace characters with a single space character.
 pub fn collapse_whitespace(text: &str) -> Cow<'_, str> {
-    lazy_static! {
-        static ref RE: Regex = Regex::new(r"\s\s+").unwrap();
-    }
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s\s+").unwrap());
     RE.replace_all(text, " ")
 }
 
@@ -44,31 +44,43 @@ pub fn normalize_id(content: &str) -> String {
 
 /// Generate an ID for use with anchors which is derived from a "normalised"
 /// string.
+// This function should be made private when the deprecation expires.
+#[deprecated(since = "0.4.16", note = "use unique_id_from_content instead")]
 pub fn id_from_content(content: &str) -> String {
     let mut content = content.to_string();
 
     // Skip any tags or html-encoded stuff
-    const REPL_SUB: &[&str] = &[
-        "<em>",
-        "</em>",
-        "<code>",
-        "</code>",
-        "<strong>",
-        "</strong>",
-        "&lt;",
-        "&gt;",
-        "&amp;",
-        "&#39;",
-        "&quot;",
-    ];
+    static HTML: Lazy<Regex> = Lazy::new(|| Regex::new(r"(<.*?>)").unwrap());
+    content = HTML.replace_all(&content, "").into();
+    const REPL_SUB: &[&str] = &["&lt;", "&gt;", "&amp;", "&#39;", "&quot;"];
     for sub in REPL_SUB {
         content = content.replace(sub, "");
     }
 
     // Remove spaces and hashes indicating a header
     let trimmed = content.trim().trim_start_matches('#').trim();
-
     normalize_id(trimmed)
+}
+
+/// Generate an ID for use with anchors which is derived from a "normalised"
+/// string.
+///
+/// Each ID returned will be unique, if the same `id_counter` is provided on
+/// each call.
+pub fn unique_id_from_content(content: &str, id_counter: &mut HashMap<String, usize>) -> String {
+    let id = {
+        #[allow(deprecated)]
+        id_from_content(content)
+    };
+
+    // If we have headers with the same normalized id, append an incrementing counter
+    let id_count = id_counter.entry(id.clone()).or_insert(0);
+    let unique_id = match *id_count {
+        0 => id,
+        id_count => format!("{}-{}", id, id_count),
+    };
+    *id_count += 1;
+    unique_id
 }
 
 /// Fix links to the correct location.
@@ -81,10 +93,9 @@ pub fn id_from_content(content: &str) -> String {
 /// None. Ideally, print page links would link to anchors on the print page,
 /// but that is very difficult.
 fn adjust_links<'a>(event: Event<'a>, path: Option<&Path>) -> Event<'a> {
-    lazy_static! {
-        static ref SCHEME_LINK: Regex = Regex::new(r"^[a-z][a-z0-9+.-]*:").unwrap();
-        static ref MD_LINK: Regex = Regex::new(r"(?P<link>.*)\.md(?P<anchor>#.*)?").unwrap();
-    }
+    static SCHEME_LINK: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[a-z][a-z0-9+.-]*:").unwrap());
+    static MD_LINK: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?P<link>.*)\.md(?P<anchor>#.*)?").unwrap());
 
     fn fix<'a>(dest: CowStr<'a>, path: Option<&Path>) -> CowStr<'a> {
         if dest.starts_with('#') {
@@ -137,10 +148,8 @@ fn adjust_links<'a>(event: Event<'a>, path: Option<&Path>) -> Event<'a> {
         // There are dozens of HTML tags/attributes that contain paths, so
         // feel free to add more tags if desired; these are the only ones I
         // care about right now.
-        lazy_static! {
-            static ref HTML_LINK: Regex =
-                Regex::new(r#"(<(?:a|img) [^>]*?(?:src|href)=")([^"]+?)""#).unwrap();
-        }
+        static HTML_LINK: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r#"(<(?:a|img) [^>]*?(?:src|href)=")([^"]+?)""#).unwrap());
 
         HTML_LINK
             .replace_all(&html, |caps: &regex::Captures<'_>| {
@@ -168,104 +177,61 @@ pub fn render_markdown(text: &str, curly_quotes: bool) -> String {
     render_markdown_with_path(text, curly_quotes, None)
 }
 
-pub fn new_cmark_parser(text: &str) -> Parser<'_> {
+pub fn new_cmark_parser(text: &str, curly_quotes: bool) -> Parser<'_, '_> {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_FOOTNOTES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
+    if curly_quotes {
+        opts.insert(Options::ENABLE_SMART_PUNCTUATION);
+    }
     Parser::new_ext(text, opts)
 }
 
 pub fn render_markdown_with_path(text: &str, curly_quotes: bool, path: Option<&Path>) -> String {
     let mut s = String::with_capacity(text.len() * 3 / 2);
-    let p = new_cmark_parser(text);
-    let mut converter = EventQuoteConverter::new(curly_quotes);
+    let p = new_cmark_parser(text, curly_quotes);
     let events = p
         .map(clean_codeblock_headers)
         .map(|event| adjust_links(event, path))
-        .map(|event| converter.convert(event));
+        .flat_map(|event| {
+            let (a, b) = wrap_tables(event);
+            a.into_iter().chain(b)
+        });
 
     html::push_html(&mut s, events);
     s
 }
 
-struct EventQuoteConverter {
-    enabled: bool,
-    convert_text: bool,
-}
-
-impl EventQuoteConverter {
-    fn new(enabled: bool) -> Self {
-        EventQuoteConverter {
-            enabled,
-            convert_text: true,
-        }
-    }
-
-    fn convert<'a>(&mut self, event: Event<'a>) -> Event<'a> {
-        if !self.enabled {
-            return event;
-        }
-
-        match event {
-            Event::Start(Tag::CodeBlock(_)) => {
-                self.convert_text = false;
-                event
-            }
-            Event::End(Tag::CodeBlock(_)) => {
-                self.convert_text = true;
-                event
-            }
-            Event::Text(ref text) if self.convert_text => {
-                Event::Text(CowStr::from(convert_quotes_to_curly(text)))
-            }
-            _ => event,
-        }
+/// Wraps tables in a `.table-wrapper` class to apply overflow-x rules to.
+fn wrap_tables(event: Event<'_>) -> (Option<Event<'_>>, Option<Event<'_>>) {
+    match event {
+        Event::Start(Tag::Table(_)) => (
+            Some(Event::Html(r#"<div class="table-wrapper">"#.into())),
+            Some(event),
+        ),
+        Event::End(Tag::Table(_)) => (Some(event), Some(Event::Html(r#"</div>"#.into()))),
+        _ => (Some(event), None),
     }
 }
 
 fn clean_codeblock_headers(event: Event<'_>) -> Event<'_> {
     match event {
         Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(ref info))) => {
-            let info: String = info.chars().filter(|ch| !ch.is_whitespace()).collect();
+            let info: String = info
+                .chars()
+                .map(|x| match x {
+                    ' ' | '\t' => ',',
+                    _ => x,
+                })
+                .filter(|ch| !ch.is_whitespace())
+                .collect();
 
             Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(CowStr::from(info))))
         }
         _ => event,
     }
-}
-
-fn convert_quotes_to_curly(original_text: &str) -> String {
-    // We'll consider the start to be "whitespace".
-    let mut preceded_by_whitespace = true;
-
-    original_text
-        .chars()
-        .map(|original_char| {
-            let converted_char = match original_char {
-                '\'' => {
-                    if preceded_by_whitespace {
-                        '‘'
-                    } else {
-                        '’'
-                    }
-                }
-                '"' => {
-                    if preceded_by_whitespace {
-                        '“'
-                    } else {
-                        '”'
-                    }
-                }
-                _ => original_char,
-            };
-
-            preceded_by_whitespace = original_char.is_whitespace();
-
-            converted_char
-        })
-        .collect()
 }
 
 /// Prints a "backtrace" of some `Error`.
@@ -277,8 +243,26 @@ pub fn log_backtrace(e: &Error) {
     }
 }
 
+pub(crate) fn bracket_escape(mut s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len());
+    let needs_escape: &[char] = &['<', '>'];
+    while let Some(next) = s.find(needs_escape) {
+        escaped.push_str(&s[..next]);
+        match s.as_bytes()[next] {
+            b'<' => escaped.push_str("&lt;"),
+            b'>' => escaped.push_str("&gt;"),
+            _ => unreachable!(),
+        }
+        s = &s[next + 1..];
+    }
+    escaped.push_str(s);
+    escaped
+}
+
 #[cfg(test)]
 mod tests {
+    use super::bracket_escape;
+
     mod render_markdown {
         use super::super::render_markdown;
 
@@ -306,6 +290,22 @@ mod tests {
                 render_markdown("[phantom data](foo.html#phantomdata)", false),
                 "<p><a href=\"foo.html#phantomdata\">phantom data</a></p>\n"
             );
+        }
+
+        #[test]
+        fn it_can_wrap_tables() {
+            let src = r#"
+| Original        | Punycode        | Punycode + Encoding |
+|-----------------|-----------------|---------------------|
+| føø             | f-5gaa          | f_5gaa              |
+"#;
+            let out = r#"
+<div class="table-wrapper"><table><thead><tr><th>Original</th><th>Punycode</th><th>Punycode + Encoding</th></tr></thead><tbody>
+<tr><td>føø</td><td>f-5gaa</td><td>f_5gaa</td></tr>
+</tbody></table>
+</div>
+"#.trim();
+            assert_eq!(render_markdown(src, false), out);
         }
 
         #[test]
@@ -372,7 +372,7 @@ more text with spaces
 ```
 "#;
 
-            let expected = r#"<pre><code class="language-rust,no_run,,,should_panic,,property_3"></code></pre>
+            let expected = r#"<pre><code class="language-rust,,,,,no_run,,,should_panic,,,,property_3"></code></pre>
 "#;
             assert_eq!(render_markdown(input, false), expected);
             assert_eq!(render_markdown(input, true), expected);
@@ -399,8 +399,9 @@ more text with spaces
         }
     }
 
-    mod html_munging {
-        use super::super::{id_from_content, normalize_id};
+    #[allow(deprecated)]
+    mod id_from_content {
+        use super::super::id_from_content;
 
         #[test]
         fn it_generates_anchors() {
@@ -410,6 +411,10 @@ more text with spaces
             );
             assert_eq!(id_from_content("## **Bold** title"), "bold-title");
             assert_eq!(id_from_content("## `Code` title"), "code-title");
+            assert_eq!(
+                id_from_content("## title <span dir=rtl>foo</span>"),
+                "title-foo"
+            );
         }
 
         #[test]
@@ -424,6 +429,10 @@ more text with spaces
             );
             assert_eq!(id_from_content("## Über"), "Über");
         }
+    }
+
+    mod html_munging {
+        use super::super::{normalize_id, unique_id_from_content};
 
         #[test]
         fn it_normalizes_ids() {
@@ -442,24 +451,38 @@ more text with spaces
             assert_eq!(normalize_id("한국어"), "한국어");
             assert_eq!(normalize_id(""), "");
         }
+
+        #[test]
+        fn it_generates_unique_ids_from_content() {
+            // Same id if not given shared state
+            assert_eq!(
+                unique_id_from_content("## 中文標題 CJK title", &mut Default::default()),
+                "中文標題-cjk-title"
+            );
+            assert_eq!(
+                unique_id_from_content("## 中文標題 CJK title", &mut Default::default()),
+                "中文標題-cjk-title"
+            );
+
+            // Different id if given shared state
+            let mut id_counter = Default::default();
+            assert_eq!(unique_id_from_content("## Über", &mut id_counter), "Über");
+            assert_eq!(
+                unique_id_from_content("## 中文標題 CJK title", &mut id_counter),
+                "中文標題-cjk-title"
+            );
+            assert_eq!(unique_id_from_content("## Über", &mut id_counter), "Über-1");
+            assert_eq!(unique_id_from_content("## Über", &mut id_counter), "Über-2");
+        }
     }
 
-    mod convert_quotes_to_curly {
-        use super::super::convert_quotes_to_curly;
-
-        #[test]
-        fn it_converts_single_quotes() {
-            assert_eq!(convert_quotes_to_curly("'one', 'two'"), "‘one’, ‘two’");
-        }
-
-        #[test]
-        fn it_converts_double_quotes() {
-            assert_eq!(convert_quotes_to_curly(r#""one", "two""#), "“one”, “two”");
-        }
-
-        #[test]
-        fn it_treats_tab_as_whitespace() {
-            assert_eq!(convert_quotes_to_curly("\t'one'"), "\t‘one’");
-        }
+    #[test]
+    fn escaped_brackets() {
+        assert_eq!(bracket_escape(""), "");
+        assert_eq!(bracket_escape("<"), "&lt;");
+        assert_eq!(bracket_escape(">"), "&gt;");
+        assert_eq!(bracket_escape("<>"), "&lt;&gt;");
+        assert_eq!(bracket_escape("<test>"), "&lt;test&gt;");
+        assert_eq!(bracket_escape("a<test>b"), "a&lt;test&gt;b");
     }
 }

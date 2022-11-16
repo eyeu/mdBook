@@ -27,7 +27,10 @@ use std::process::{Command, Stdio};
 use crate::book::Book;
 use crate::config::Config;
 use crate::errors::*;
+use log::{error, info, trace, warn};
 use toml::Value;
+
+use serde::{Deserialize, Serialize};
 
 /// An arbitrary `mdbook` backend.
 ///
@@ -166,7 +169,7 @@ impl CmdRenderer {
                 } else {
                     // Let this bubble through to later be handled by
                     // handle_render_command_error.
-                    abs_exe.to_path_buf()
+                    abs_exe
                 }
             }
         };

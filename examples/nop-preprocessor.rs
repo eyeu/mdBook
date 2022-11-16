@@ -1,17 +1,18 @@
 use crate::nop_lib::Nop;
-use clap::{App, Arg, ArgMatches, SubCommand};
+use clap::{App, Arg, ArgMatches};
 use mdbook::book::Book;
 use mdbook::errors::Error;
 use mdbook::preprocess::{CmdPreprocessor, Preprocessor, PreprocessorContext};
+use semver::{Version, VersionReq};
 use std::io;
 use std::process;
 
-pub fn make_app() -> App<'static, 'static> {
+pub fn make_app() -> App<'static> {
     App::new("nop-preprocessor")
         .about("A mdbook preprocessor which does precisely nothing")
         .subcommand(
-            SubCommand::with_name("supports")
-                .arg(Arg::with_name("renderer").required(true))
+            App::new("supports")
+                .arg(Arg::new("renderer").required(true))
                 .about("Check whether a renderer is supported by this preprocessor"),
         )
 }
@@ -33,9 +34,10 @@ fn main() {
 fn handle_preprocessing(pre: &dyn Preprocessor) -> Result<(), Error> {
     let (ctx, book) = CmdPreprocessor::parse_input(io::stdin())?;
 
-    if ctx.mdbook_version != mdbook::MDBOOK_VERSION {
-        // We should probably use the `semver` crate to check compatibility
-        // here...
+    let book_version = Version::parse(&ctx.mdbook_version)?;
+    let version_req = VersionReq::parse(mdbook::MDBOOK_VERSION)?;
+
+    if !version_req.matches(&book_version) {
         eprintln!(
             "Warning: The {} plugin was built against version {} of mdbook, \
              but we're being called from version {}",
@@ -53,7 +55,7 @@ fn handle_preprocessing(pre: &dyn Preprocessor) -> Result<(), Error> {
 
 fn handle_supports(pre: &dyn Preprocessor, sub_args: &ArgMatches) -> ! {
     let renderer = sub_args.value_of("renderer").expect("Required argument");
-    let supported = pre.supports_renderer(&renderer);
+    let supported = pre.supports_renderer(renderer);
 
     // Signal whether the renderer is supported by exiting with 1 or 0.
     if supported {
@@ -97,6 +99,60 @@ mod nop_lib {
 
         fn supports_renderer(&self, renderer: &str) -> bool {
             renderer != "not-supported"
+        }
+    }
+
+    #[cfg(test)]
+    mod test {
+        use super::*;
+
+        #[test]
+        fn nop_preprocessor_run() {
+            let input_json = r##"[
+                {
+                    "root": "/path/to/book",
+                    "config": {
+                        "book": {
+                            "authors": ["AUTHOR"],
+                            "language": "en",
+                            "multilingual": false,
+                            "src": "src",
+                            "title": "TITLE"
+                        },
+                        "preprocessor": {
+                            "nop": {}
+                        }
+                    },
+                    "renderer": "html",
+                    "mdbook_version": "0.4.21"
+                },
+                {
+                    "sections": [
+                        {
+                            "Chapter": {
+                                "name": "Chapter 1",
+                                "content": "# Chapter 1\n",
+                                "number": [1],
+                                "sub_items": [],
+                                "path": "chapter_1.md",
+                                "source_path": "chapter_1.md",
+                                "parent_names": []
+                            }
+                        }
+                    ],
+                    "__non_exhaustive": null
+                }
+            ]"##;
+            let input_json = input_json.as_bytes();
+
+            let (ctx, book) = mdbook::preprocess::CmdPreprocessor::parse_input(input_json).unwrap();
+            let expected_book = book.clone();
+            let result = Nop::new().run(&ctx, book);
+            assert!(result.is_ok());
+
+            // The nop-preprocessor should not have made any changes to the book content.
+            let actual_book = result.unwrap();
+            assert_eq!(actual_book, expected_book);
         }
     }
 }

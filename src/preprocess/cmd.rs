@@ -1,6 +1,7 @@
 use super::{Preprocessor, PreprocessorContext};
 use crate::book::Book;
 use crate::errors::*;
+use log::{debug, trace, warn};
 use shlex::Shlex;
 use std::io::{self, Read, Write};
 use std::process::{Child, Command, Stdio};
@@ -49,7 +50,7 @@ impl CmdPreprocessor {
     fn write_input_to_child(&self, child: &mut Child, book: &Book, ctx: &PreprocessorContext) {
         let stdin = child.stdin.take().expect("Child has stdin");
 
-        if let Err(e) = self.write_input(stdin, &book, &ctx) {
+        if let Err(e) = self.write_input(stdin, book, ctx) {
             // Looks like the backend hung up before we could finish
             // sending it the render context. Log the error and keep going
             warn!("Error writing the RenderContext to the backend, {}", e);
@@ -109,18 +110,28 @@ impl Preprocessor for CmdPreprocessor {
 
         self.write_input_to_child(&mut child, &book, ctx);
 
-        let output = child
-            .wait_with_output()
-            .with_context(|| "Error waiting for the preprocessor to complete")?;
+        let output = child.wait_with_output().with_context(|| {
+            format!(
+                "Error waiting for the \"{}\" preprocessor to complete",
+                self.name
+            )
+        })?;
 
         trace!("{} exited with output: {:?}", self.cmd, output);
         ensure!(
             output.status.success(),
-            "The preprocessor exited unsuccessfully"
+            format!(
+                "The \"{}\" preprocessor exited unsuccessfully with {} status",
+                self.name, output.status
+            )
         );
 
-        serde_json::from_slice(&output.stdout)
-            .with_context(|| "Unable to parse the preprocessed book")
+        serde_json::from_slice(&output.stdout).with_context(|| {
+            format!(
+                "Unable to parse the preprocessed book from \"{}\" processor",
+                self.name
+            )
+        })
     }
 
     fn supports_renderer(&self, renderer: &str) -> bool {

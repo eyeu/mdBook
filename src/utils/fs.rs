@@ -1,10 +1,11 @@
 use crate::errors::*;
+use log::{debug, trace};
 use std::convert::Into;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-/// Naively replaces any path seperator with a forward-slash '/'
+/// Naively replaces any path separator with a forward-slash '/'
 pub fn normalize_path(path: &str) -> String {
     use std::path::is_separator;
     path.chars()
@@ -247,7 +248,7 @@ mod tests {
         }
 
         if let Err(e) =
-            copy_files_except_ext(&tmp.path(), &tmp.path().join("output"), true, None, &["md"])
+            copy_files_except_ext(tmp.path(), &tmp.path().join("output"), true, None, &["md"])
         {
             panic!("Error while executing the function:\n{:?}", e);
         }

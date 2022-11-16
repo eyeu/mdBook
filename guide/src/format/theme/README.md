@@ -35,12 +35,16 @@ built-in ones, they will not get updated with new fixes / features.
 **Note:** When you override a file, it is possible that you break some
 functionality. Therefore I recommend to use the file from the default theme as
 template and only add / modify what you need. You can copy the default theme
-into your source directory automatically by using `mdbook init --theme` just
+into your source directory automatically by using `mdbook init --theme` and just
 remove the files you don't want to override.
+
+`mdbook init --theme` will not create every file listed above.
+Some files, such as `head.hbs`, do not have built-in equivalents.
+Just create the file if you need it.
 
 If you completely replace all built-in themes, be sure to also set
 [`output.html.preferred-dark-theme`] in the config, which defaults to the
 built-in `navy` theme.
 
-[`output.html.preferred-dark-theme`]: ../config.md#html-renderer-options
+[`output.html.preferred-dark-theme`]: ../configuration/renderers.md#html-renderer-options
 [newer browsers]: https://caniuse.com/#feat=link-icon-svg

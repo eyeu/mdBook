@@ -1,5 +1,5 @@
 use crate::get_book_dir;
-use clap::{App, ArgMatches, SubCommand};
+use clap::{arg, App, Arg, ArgMatches};
 use mdbook::config;
 use mdbook::errors::Result;
 use mdbook::MDBook;
@@ -8,16 +8,31 @@ use std::io::Write;
 use std::process::Command;
 
 // Create clap subcommand arguments
-pub fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    SubCommand::with_name("init")
+pub fn make_subcommand<'help>() -> App<'help> {
+    App::new("init")
         .about("Creates the boilerplate structure and files for a new book")
         // the {n} denotes a newline which will properly aligned in all help messages
-        .arg_from_usage(
-            "[dir] 'Directory to create the book in{n}\
-             (Defaults to the Current Directory when omitted)'",
+        .arg(arg!([dir]
+            "Directory to create the book in{n}\
+            (Defaults to the Current Directory when omitted)"
+        ))
+        .arg(arg!(--theme "Copies the default theme into your source folder"))
+        .arg(arg!(--force "Skips confirmation prompts"))
+        .arg(
+            Arg::new("title")
+                .long("title")
+                .takes_value(true)
+                .help("Sets the book title")
+                .required(false),
         )
-        .arg_from_usage("--theme 'Copies the default theme into your source folder'")
-        .arg_from_usage("--force 'Skips confirmation prompts'")
+        .arg(
+            Arg::new("ignore")
+                .long("ignore")
+                .takes_value(true)
+                .possible_values(&["none", "git"])
+                .help("Creates a VCS ignore file (i.e. .gitignore)")
+                .required(false),
+        )
 }
 
 // Init command implementation
@@ -25,7 +40,6 @@ pub fn execute(args: &ArgMatches) -> Result<()> {
     let book_dir = get_book_dir(args);
     let mut builder = MDBook::init(&book_dir);
     let mut config = config::Config::default();
-
     // If flag `--theme` is present, copy theme to src
     if args.is_present("theme") {
         let theme_dir = book_dir.join("theme");
@@ -45,13 +59,23 @@ pub fn execute(args: &ArgMatches) -> Result<()> {
         }
     }
 
-    println!("\nDo you want a .gitignore to be created? (y/n)");
-
-    if confirm() {
-        builder.create_gitignore(true);
+    if let Some(ignore) = args.value_of("ignore") {
+        match ignore {
+            "git" => builder.create_gitignore(true),
+            _ => builder.create_gitignore(false),
+        };
+    } else {
+        println!("\nDo you want a .gitignore to be created? (y/n)");
+        if confirm() {
+            builder.create_gitignore(true);
+        }
     }
 
-    config.book.title = request_book_title();
+    config.book.title = if args.is_present("title") {
+        args.value_of("title").map(String::from)
+    } else {
+        request_book_title()
+    };
 
     if let Some(author) = get_author_name() {
         debug!("Obtained user name from gitconfig: {:?}", author);
@@ -98,8 +122,5 @@ fn confirm() -> bool {
     io::stdout().flush().unwrap();
     let mut s = String::new();
     io::stdin().read_line(&mut s).ok();
-    match &*s.trim() {
-        "Y" | "y" | "yes" | "Yes" => true,
-        _ => false,
-    }
+    matches!(&*s.trim(), "Y" | "y" | "yes" | "Yes")
 }

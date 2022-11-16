@@ -1,5 +1,5 @@
 use crate::{get_book_dir, open};
-use clap::{App, ArgMatches, SubCommand};
+use clap::{arg, App, Arg, ArgMatches};
 use mdbook::errors::Result;
 use mdbook::utils;
 use mdbook::MDBook;
@@ -10,19 +10,25 @@ use std::thread::sleep;
 use std::time::Duration;
 
 // Create clap subcommand arguments
-pub fn make_subcommand<'a, 'b>() -> App<'a, 'b> {
-    SubCommand::with_name("watch")
+pub fn make_subcommand<'help>() -> App<'help> {
+    App::new("watch")
         .about("Watches a book's files and rebuilds it on changes")
-        .arg_from_usage(
-            "-d, --dest-dir=[dest-dir] 'Output directory for the book{n}\
-             Relative paths are interpreted relative to the book's root directory.{n}\
-             If omitted, mdBook uses build.build-dir from book.toml or defaults to `./book`.'",
+        .arg(
+            Arg::new("dest-dir")
+                .short('d')
+                .long("dest-dir")
+                .value_name("dest-dir")
+                .help(
+                    "Output directory for the book{n}\
+                    Relative paths are interpreted relative to the book's root directory.{n}\
+                    If omitted, mdBook uses build.build-dir from book.toml or defaults to `./book`.",
+                ),
         )
-        .arg_from_usage(
-            "[dir] 'Root directory for the book{n}\
-             (Defaults to the Current Directory when omitted)'",
-        )
-        .arg_from_usage("-o, --open 'Open the compiled book in a web browser'")
+        .arg(arg!([dir]
+            "Root directory for the book{n}\
+            (Defaults to the Current Directory when omitted)"
+        ))
+        .arg(arg!(-o --open "Opens the compiled book in a web browser"))
 }
 
 // Watch command implementation
@@ -39,7 +45,12 @@ pub fn execute(args: &ArgMatches) -> Result<()> {
 
     if args.is_present("open") {
         book.build()?;
-        open(book.build_dir_for("html").join("index.html"));
+        let path = book.build_dir_for("html").join("index.html");
+        if !path.exists() {
+            error!("No chapter available to open");
+            std::process::exit(1)
+        }
+        open(path);
     }
 
     trigger_on_change(&book, |paths, book_dir| {
@@ -58,7 +69,7 @@ pub fn execute(args: &ArgMatches) -> Result<()> {
     Ok(())
 }
 
-fn remove_ignored_files(book_root: &PathBuf, paths: &[PathBuf]) -> Vec<PathBuf> {
+fn remove_ignored_files(book_root: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
     if paths.is_empty() {
         return vec![];
     }
@@ -81,7 +92,7 @@ fn remove_ignored_files(book_root: &PathBuf, paths: &[PathBuf]) -> Vec<PathBuf> 
     }
 }
 
-fn find_gitignore(book_root: &PathBuf) -> Option<PathBuf> {
+fn find_gitignore(book_root: &Path) -> Option<PathBuf> {
     book_root
         .ancestors()
         .map(|p| p.join(".gitignore"))
@@ -135,6 +146,17 @@ where
     // Add the book.toml file to the watcher if it exists
     let _ = watcher.watch(book.root.join("book.toml"), NonRecursive);
 
+    for dir in &book.config.build.extra_watch_dirs {
+        let path = dir.canonicalize().unwrap();
+        if let Err(e) = watcher.watch(&path, Recursive) {
+            error!(
+                "Error while watching extra directory {:?}:\n    {:?}",
+                path, e
+            );
+            std::process::exit(1);
+        }
+    }
+
     info!("Listening for changes...");
 
     loop {
@@ -155,7 +177,11 @@ where
             })
             .collect::<Vec<_>>();
 
-        let paths = remove_ignored_files(&book.root, &paths[..]);
+        // If we are watching files outside the current repository (via extra-watch-dirs), then they are definitionally
+        // ignored by gitignore. So we handle this case by including such files into the watched paths list.
+        let any_external_paths = paths.iter().filter(|p| !p.starts_with(&book.root)).cloned();
+        let mut paths = remove_ignored_files(&book.root, &paths[..]);
+        paths.extend(any_external_paths);
 
         if !paths.is_empty() {
             closure(paths, &book.root);

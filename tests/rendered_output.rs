@@ -17,6 +17,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 use tempfile::Builder as TempFileBuilder;
 use walkdir::{DirEntry, WalkDir};
 
@@ -34,6 +35,8 @@ const TOC_SECOND_LEVEL: &[&str] = &[
     "1.3. Recursive",
     "1.4. Markdown",
     "1.5. Unicode",
+    "1.6. No Headers",
+    "1.7. Duplicate Headers",
     "2.1. Nested Chapter",
 ];
 
@@ -147,6 +150,25 @@ fn rendered_code_has_playground_stuff() {
 
     let book_js = temp.path().join("book/book.js");
     assert_contains_strings(book_js, &[".playground"]);
+}
+
+#[test]
+fn rendered_code_does_not_have_playground_stuff_in_html_when_disabled_in_config() {
+    let temp = DummyBook::new().build().unwrap();
+    let config = Config::from_str(
+        "
+    [output.html.playground]
+    runnable = false
+    ",
+    )
+    .unwrap();
+    let md = MDBook::load_with_config(temp.path(), config).unwrap();
+    md.build().unwrap();
+
+    let nested = temp.path().join("book/first/nested.html");
+    let playground_class = vec![r#"class="playground""#];
+
+    assert_doesnt_contain_strings(nested, &playground_class);
 }
 
 #[test]
@@ -264,7 +286,7 @@ fn root_index_html() -> Result<Document> {
 fn check_second_toc_level() {
     let doc = root_index_html().unwrap();
     let mut should_be = Vec::from(TOC_SECOND_LEVEL);
-    should_be.sort();
+    should_be.sort_unstable();
 
     let pred = descendants!(
         Class("chapter"),
@@ -288,7 +310,7 @@ fn check_first_toc_level() {
     let mut should_be = Vec::from(TOC_TOP_LEVEL);
 
     should_be.extend(TOC_SECOND_LEVEL);
-    should_be.sort();
+    should_be.sort_unstable();
 
     let pred = descendants!(
         Class("chapter"),
@@ -446,6 +468,21 @@ fn by_default_mdbook_use_index_preprocessor_to_convert_readme_to_index() {
 }
 
 #[test]
+fn first_chapter_is_copied_as_index_even_if_not_first_elem() {
+    let temp = DummyBook::new().build().unwrap();
+    let mut cfg = Config::default();
+    cfg.set("book.src", "index_html_test")
+        .expect("Couldn't set config.book.src to \"index_html_test\"");
+    let md = MDBook::load_with_config(temp.path(), cfg).unwrap();
+    md.build().unwrap();
+
+    let root = temp.path().join("book");
+    let chapter = fs::read_to_string(root.join("chapter_1.html")).expect("read chapter 1");
+    let index = fs::read_to_string(root.join("index.html")).expect("read index");
+    pretty_assertions::assert_eq!(chapter, index);
+}
+
+#[test]
 fn theme_dir_overrides_work_correctly() {
     let book_dir = dummy_book::new_copy_of_example_book().unwrap();
     let book_dir = book_dir.path();
@@ -535,10 +572,61 @@ fn redirects_are_emitted_correctly() {
         let mut redirect_file = md.build_dir_for("html");
         // append everything except the bits that make it absolute
         // (e.g. "/" or "C:\")
-        redirect_file.extend(remove_absolute_components(&original));
+        redirect_file.extend(remove_absolute_components(original));
         let contents = fs::read_to_string(&redirect_file).unwrap();
         assert!(contents.contains(redirect));
     }
+}
+
+#[test]
+fn edit_url_has_default_src_dir_edit_url() {
+    let temp = DummyBook::new().build().unwrap();
+    let book_toml = r#"
+        [book]
+        title = "implicit"
+
+        [output.html]
+        edit-url-template = "https://github.com/rust-lang/mdBook/edit/master/guide/{path}"    
+        "#;
+
+    write_file(temp.path(), "book.toml", book_toml.as_bytes()).unwrap();
+
+    let md = MDBook::load(temp.path()).unwrap();
+    md.build().unwrap();
+
+    let index_html = temp.path().join("book").join("index.html");
+    assert_contains_strings(
+        index_html,
+        &[
+            r#"href="https://github.com/rust-lang/mdBook/edit/master/guide/src/README.md" title="Suggest an edit""#,
+        ],
+    );
+}
+
+#[test]
+fn edit_url_has_configured_src_dir_edit_url() {
+    let temp = DummyBook::new().build().unwrap();
+    let book_toml = r#"
+        [book]
+        title = "implicit"
+        src = "src2"
+
+        [output.html]
+        edit-url-template = "https://github.com/rust-lang/mdBook/edit/master/guide/{path}"    
+        "#;
+
+    write_file(temp.path(), "book.toml", book_toml.as_bytes()).unwrap();
+
+    let md = MDBook::load(temp.path()).unwrap();
+    md.build().unwrap();
+
+    let index_html = temp.path().join("book").join("index.html");
+    assert_contains_strings(
+        index_html,
+        &[
+            r#"href="https://github.com/rust-lang/mdBook/edit/master/guide/src2/README.md" title="Suggest an edit""#,
+        ],
+    );
 }
 
 fn remove_absolute_components(path: &Path) -> impl Iterator<Item = Component> + '_ {
@@ -546,6 +634,93 @@ fn remove_absolute_components(path: &Path) -> impl Iterator<Item = Component> + 
         Component::Prefix(_) | Component::RootDir => true,
         _ => false,
     })
+}
+
+/// Checks formatting of summary names with inline elements.
+#[test]
+fn summary_with_markdown_formatting() {
+    let temp = DummyBook::new().build().unwrap();
+    let mut cfg = Config::default();
+    cfg.set("book.src", "summary-formatting").unwrap();
+    let md = MDBook::load_with_config(temp.path(), cfg).unwrap();
+    md.build().unwrap();
+
+    let rendered_path = temp.path().join("book/formatted-summary.html");
+    assert_contains_strings(
+        rendered_path,
+        &[
+            r#"<a href="formatted-summary.html" class="active"><strong aria-hidden="true">1.</strong> Italic code *escape* `escape2`</a>"#,
+            r#"<a href="soft.html"><strong aria-hidden="true">2.</strong> Soft line break</a>"#,
+            r#"<a href="escaped-tag.html"><strong aria-hidden="true">3.</strong> &lt;escaped tag&gt;</a>"#,
+        ],
+    );
+
+    let generated_md = temp.path().join("summary-formatting/formatted-summary.md");
+    assert_eq!(
+        fs::read_to_string(generated_md).unwrap(),
+        "# Italic code *escape* `escape2`\n"
+    );
+    let generated_md = temp.path().join("summary-formatting/soft.md");
+    assert_eq!(
+        fs::read_to_string(generated_md).unwrap(),
+        "# Soft line break\n"
+    );
+    let generated_md = temp.path().join("summary-formatting/escaped-tag.md");
+    assert_eq!(
+        fs::read_to_string(generated_md).unwrap(),
+        "# &lt;escaped tag&gt;\n"
+    );
+}
+
+/// Ensure building fails if `[output.html].theme` points to a non-existent directory
+#[test]
+fn failure_on_missing_theme_directory() {
+    // 1. Using default theme should work
+    let temp = DummyBook::new().build().unwrap();
+    let book_toml = r#"
+        [book]
+        title = "implicit"
+        src = "src"
+        "#;
+
+    write_file(temp.path(), "book.toml", book_toml.as_bytes()).unwrap();
+    let md = MDBook::load(temp.path()).unwrap();
+    let got = md.build();
+    assert!(got.is_ok());
+
+    // 2. Pointing to a normal directory should work
+    let temp = DummyBook::new().build().unwrap();
+    let created = fs::create_dir(temp.path().join("theme-directory"));
+    assert!(created.is_ok());
+    let book_toml = r#"
+        [book]
+        title = "implicit"
+        src = "src"
+
+        [output.html]
+        theme = "./theme-directory"
+        "#;
+
+    write_file(temp.path(), "book.toml", book_toml.as_bytes()).unwrap();
+    let md = MDBook::load(temp.path()).unwrap();
+    let got = md.build();
+    assert!(got.is_ok());
+
+    // 3. Pointing to a non-existent directory should fail
+    let temp = DummyBook::new().build().unwrap();
+    let book_toml = r#"
+        [book]
+        title = "implicit"
+        src = "src"
+
+        [output.html]
+        theme = "./non-existent-directory"
+        "#;
+
+    write_file(temp.path(), "book.toml", book_toml.as_bytes()).unwrap();
+    let md = MDBook::load(temp.path()).unwrap();
+    let got = md.build();
+    assert!(got.is_err());
 }
 
 #[cfg(feature = "search")]
@@ -560,7 +735,7 @@ mod search {
         let index = fs::read_to_string(index).unwrap();
         let index = index.trim_start_matches("Object.assign(window.search, ");
         let index = index.trim_end_matches(");");
-        serde_json::from_str(&index).unwrap()
+        serde_json::from_str(index).unwrap()
     }
 
     #[test]
@@ -580,11 +755,13 @@ mod search {
         let introduction = get_doc_ref("intro.html#introduction");
         let some_section = get_doc_ref("first/index.html#some-section");
         let summary = get_doc_ref("first/includes.html#summary");
+        let no_headers = get_doc_ref("first/no-headers.html");
+        let duplicate_headers_1 = get_doc_ref("first/duplicate-headers.html#header-text-1");
         let conclusion = get_doc_ref("conclusion.html#conclusion");
 
         let bodyidx = &index["index"]["index"]["body"]["root"];
         let textidx = &bodyidx["t"]["e"]["x"]["t"];
-        assert_eq!(textidx["df"], 2);
+        assert_eq!(textidx["df"], 5);
         assert_eq!(textidx["docs"][&first_chapter]["tf"], 1.0);
         assert_eq!(textidx["docs"][&introduction]["tf"], 1.0);
 
@@ -593,13 +770,25 @@ mod search {
         assert_eq!(docs[&some_section]["body"], "");
         assert_eq!(
             docs[&summary]["body"],
-            "Dummy Book Introduction First Chapter Nested Chapter Includes Recursive Markdown Unicode Second Chapter Nested Chapter Conclusion"
+            "Dummy Book Introduction First Chapter Nested Chapter Includes Recursive Markdown Unicode No Headers Duplicate Headers Second Chapter Nested Chapter Conclusion"
         );
         assert_eq!(
             docs[&summary]["breadcrumbs"],
             "First Chapter » Includes » Summary"
         );
         assert_eq!(docs[&conclusion]["body"], "I put &lt;HTML&gt; in here!");
+        assert_eq!(
+            docs[&no_headers]["breadcrumbs"],
+            "First Chapter » No Headers"
+        );
+        assert_eq!(
+            docs[&duplicate_headers_1]["breadcrumbs"],
+            "First Chapter » Duplicate Headers » Header Text"
+        );
+        assert_eq!(
+            docs[&no_headers]["body"],
+            "Capybara capybara capybara. Capybara capybara capybara. ThisLongWordIsIncludedSoWeCanCheckThatSufficientlyLongWordsAreOmittedFromTheSearchIndex."
+        );
     }
 
     // Setting this to `true` may cause issues with `cargo watch`,
