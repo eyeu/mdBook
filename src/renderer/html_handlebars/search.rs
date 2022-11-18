@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use elasticlunr::Index;
+use elasticlunr::lang::Chinese;
 use once_cell::sync::Lazy;
 use pulldown_cmark::*;
 
@@ -37,19 +38,13 @@ pub fn create_files(
     let mut index = match lang {
         Some(lang_str) => match lang_str.to_lowercase().as_str() {
             "zh" => Index::with_language(
-                elasticlunr::Language::Chinese,
+                Box::new(Chinese::new()),
                 &["title", "body", "breadcrumbs"],
             ),
             _ => Index::new(&["title", "body", "breadcrumbs"]),
         },
         None => Index::new(&["title", "body", "breadcrumbs"]),
     };
-    // pub fn create_files(search_config: &Search, destination: &Path, book: &Book) -> Result<()> {
-    //     let mut index = IndexBuilder::new()
-    //         .add_field_with_tokenizer("title", Box::new(&tokenize))
-    //         .add_field_with_tokenizer("body", Box::new(&tokenize))
-    //         .add_field_with_tokenizer("breadcrumbs", Box::new(&tokenize))
-    //         .build();
 
     let mut doc_urls = Vec::with_capacity(book.sections.len());
 
